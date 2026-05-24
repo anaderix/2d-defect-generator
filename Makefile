@@ -3,7 +3,7 @@ N ?= 5
 K ?= 2
 OUT ?= generated
 
-.PHONY: help test validate check-dups check-all list-motifs generate-geometry run-legacy clean
+.PHONY: help test validate check-dups check-all list-motifs generate-geometry run-legacy render clean
 
 help:
 	@echo "Generation:"
@@ -13,6 +13,8 @@ help:
 	@echo "                       under \$$OUT/  (default: ./generated/)"
 	@echo "                       example: make generate-geometry N=4 K=2 OUT=runs/"
 	@echo "  run-legacy         — old defect generator (run.py), pre-canonicalization"
+	@echo "  render             — ASCII-render an existing geometry.in"
+	@echo "                       example: make render FILE=generated/BN-3-3-1-pure/geometry.in"
 	@echo ""
 	@echo "Validation:"
 	@echo "  test         — algebraic & orbit tests for canonicalize.py (no DFT data needed)"
@@ -31,6 +33,7 @@ help:
 
 test:
 	$(PYTHON) tests/test_canonicalize.py
+	$(PYTHON) tests/test_render.py
 
 validate:
 	$(PYTHON) tests/validate_against_maciej.py
@@ -48,6 +51,10 @@ generate-geometry:
 
 run-legacy:
 	$(PYTHON) run.py
+
+render:
+	@if [ -z "$(FILE)" ]; then echo "usage: make render FILE=path/to/geometry.in"; exit 2; fi
+	$(PYTHON) tools/render_supercell.py $(FILE)
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} +
