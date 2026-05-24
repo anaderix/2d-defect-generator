@@ -107,7 +107,7 @@ def test_distances_preserved():
         coords = build_coords(n)
         # Wrap distances on the torus: take min over periodic images
         a1 = np.array([1.0, 0.0])
-        a2 = np.array([0.5, np.sqrt(3) / 2])
+        a2 = np.array([-0.5, np.sqrt(3) / 2])
 
         def torus_dist(p, q):
             best = np.inf

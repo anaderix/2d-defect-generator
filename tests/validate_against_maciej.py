@@ -81,7 +81,10 @@ def classify(defect: str) -> tuple[int, int] | None:
         return None  # ring — handle separately
     if "!" in defect:
         # e.g. C_B_2_0!C_N or C_B_2_90!C_B
-        d1, d2 = defect.split("!")
+        parts = defect.split("!")
+        if len(parts) != 2:
+            return None  # 3+ defect chains not currently classified
+        d1, d2 = parts
         # d1 ends with _{dist}_{angle}
         d1_type = "_".join(d1.split("_")[:2])  # 'C_B' or 'C_N'
         d2_type = d2  # already 'C_B' or 'C_N'
@@ -109,7 +112,7 @@ def main():
             continue
         n, _, defect = parsed
         kbn = classify(defect)
-        if kbn is None:
+        if kbn is None or "V_" in defect:
             n_skip += 1
             print(f"SKIP  {d.name} (ring/unsupported)")
             continue

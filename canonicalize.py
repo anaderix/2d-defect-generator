@@ -26,11 +26,15 @@ def _point_ops():
     """Return list of 6 functions (c, i, j) → (c', i', j') in fractional lattice
     coordinates, for the point group 3m around B(0, 0).
 
+    Lattice: a₁ = (1, 0), a₂ = (-1/2, √3/2), δ_BN = (1/3)a₁ + (-1/3)a₂
+    (matches BN.in convention).
+
     Derivation:
-      C₃·a₁ = -a₁ + a₂  ⇒  on B: (i, j) → (-i - j, i)
-      C₃·δ_N gives an extra -1 shift on i  ⇒  on N: (i, j) → (-i - j - 1, i)
-      σ (mirror through B(0,0)–N(0,0) bond): swaps a₁ ↔ a₂
-                          ⇒  on both channels: (i, j) → (j, i)
+      C₃·a₁ = a₂, C₃·a₂ = -a₁ - a₂   ⇒  on B: (i, j) → (-j, i - j)
+      C₃·δ_BN = (1/3)a₁ + (2/3)a₂    ⇒  N-channel needs +1 shift on j
+                                         ⇒  on N: (i, j) → (-j, i - j + 1)
+      σ (mirror through B(0,0)–N(0,0) bond): a₁ → -a₂, a₂ → -a₁
+                          ⇒  on both channels: (i, j) → (-j, -i)
     """
 
     def e(c, i, j):
@@ -38,14 +42,14 @@ def _point_ops():
 
     def c3(c, i, j):
         if c == 0:
-            return c, -i - j, i
-        return c, -i - j - 1, i
+            return c, -j, i - j
+        return c, -j, i - j + 1
 
     def c3_sq(c, i, j):
         return c3(*c3(c, i, j))
 
     def sigma(c, i, j):
-        return c, j, i
+        return c, -j, -i
 
     def sigma_c3(c, i, j):
         return sigma(*c3(c, i, j))
@@ -94,8 +98,8 @@ def canonical(tensor_flat: np.ndarray, perms: np.ndarray) -> bytes:
 def build_coords(n: int) -> np.ndarray:
     """Cartesian coordinates of all 2n² sites, shape (2n², 2). For tests."""
     a1 = np.array([1.0, 0.0])
-    a2 = np.array([0.5, np.sqrt(3) / 2])
-    delta_N = (a1 + a2) / 3.0
+    a2 = np.array([-0.5, np.sqrt(3) / 2])
+    delta_N = a1 / 3.0 - a2 / 3.0
     coords = np.zeros((2 * n * n, 2))
     for c in range(2):
         for i in range(n):
@@ -219,15 +223,16 @@ def motif_dirname(tensor: np.ndarray, n: int, perms: np.ndarray | None = None) -
 
 
 def nearest_neighbours(n: int) -> set:
-    """Set of frozenset({i, j}) for all B–N nearest-neighbour pairs (within PBC)."""
+    """Set of frozenset({i, j}) for all B–N nearest-neighbour pairs (within PBC).
+
+    Lattice: a₂ = (-1/2, √3/2), δ_BN = (1/3)a₁ - (1/3)a₂. The three N atoms
+    at bond-length from B(i,j) are N(i,j), N(i-1,j), N(i,j+1).
+    """
     pairs = set()
-    # B(i,j) neighbours N atoms at (i,j), (i-1,j), (i,j-1) — those whose
-    # offset from B(i,j) lies in {δ, δ-a₁, δ-a₂}, i.e. N belonging to cells
-    # (i,j), (i-1,j), (i,j-1).
     for i in range(n):
         for j in range(n):
             b = _site_idx(n, 0, i, j)
-            for di, dj in [(0, 0), (-1, 0), (0, -1)]:
+            for di, dj in [(0, 0), (-1, 0), (0, 1)]:
                 nn = _site_idx(n, 1, i + di, j + dj)
                 pairs.add(frozenset({b, nn}))
     return pairs
