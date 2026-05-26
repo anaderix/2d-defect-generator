@@ -5,7 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Common commands
 
 The `Makefile` is the single entry point. All targets honor `PYTHON` (default `python3`),
-`N`/`K` (supercell size and total defect count), and `OUT` (output dir).
+`N`/`K` (sub-supercell size and total defect count), `M` (host supercell size, defaults
+to `N`), and `OUT` (output dir).
 
 ```bash
 make help                              # list targets and variables
@@ -73,12 +74,20 @@ pipeline.
 
 ### Output naming
 
-`generate_geometry.py` writes `{OUT}/BN-{n}-{n}-1-{label}/geometry.in`, one per canonical
-class. The `1` is the layer count (single layer only — multi-layer stacking is not
-supported in the canonical pipeline). Each emitted `geometry.in` carries an ASCII picture
-of the supercell in its header (armchair-vertical orientation), generated via
-`tools/render_supercell.py`. The renderer also has a standalone CLI for inspecting any
-existing `geometry.in` (including legacy `maciej_BN/` files with vacancies, shown as `.`).
+`generate_geometry.py` writes one `geometry.in` per canonical class. The `1` in the
+directory name is the layer count (single layer only — multi-layer stacking is not
+supported in the canonical pipeline). Directory naming depends on the host-cell size `M`:
+
+- `BN-{m}-{m}-1-pure/` — pristine host (any `k = 0`, regardless of `n`).
+- `BN-{n}-{n}-1-{label}/` — when `m == n` (no embedding).
+- `BN-{m}-{m}-1-N{n}-{label}/` — when `m > n` (motif embedded at corner `(0,0)`,
+  remaining cells pristine; hash label stays computed on the `n × n` tensor so it's
+  stable across `m`).
+
+Each emitted `geometry.in` carries an ASCII picture of the (full m×m) supercell in its
+header (armchair-vertical orientation), generated via `tools/render_supercell.py`. The
+renderer also has a standalone CLI for inspecting any existing `geometry.in` (including
+legacy `maciej_BN/` files with vacancies, shown as `.`).
 
 ## Scaling notes
 

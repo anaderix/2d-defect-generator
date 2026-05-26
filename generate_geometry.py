@@ -1,28 +1,32 @@
 """Generate FHI-aims geometry.in files for every symmetry-distinct motif of
-a given n×n hBN supercell with a specified defect count.
+a given n×n hBN supercell with a specified defect count, optionally embedded
+in a larger m×m host supercell.
 
-Reads BN.in for the primitive cell. For each canonical class produced by
-enumerate_motifs(n, k_B, k_N), writes:
+Enumerates canonical classes on the n×n sub-supercell (cheap), then embeds
+each motif at corner (0,0) of an m×m host where m >= n. The rest of the
+host is pristine hBN. The canonical hash stays computed on the n×n tensor
+so hash labels are stable across host sizes.
 
-    {OUT_DIR}/BN-{n}-{n}-1-{label}/geometry.in
-
-where {label} is the human-readable summary (e.g. 'pure', 'benzene',
-'cb1cn1_9cd6bb').
+Output paths:
+    {OUT}/BN-{m}-{m}-1-pure/geometry.in          when k = 0
+    {OUT}/BN-{n}-{n}-1-{label}/geometry.in       when m == n and k > 0
+    {OUT}/BN-{m}-{m}-1-N{n}-{label}/geometry.in  when m > n and k > 0
 
 Usage:
-    python generate_geometry.py <n> <k> [out_dir]
+    python generate_geometry.py <n> <k> [out_dir [m]]
 
 Generates all (k_B, k_N) splits with k_B + k_N = k.
-OUT_DIR defaults to 'generated/'.
+OUT_DIR defaults to 'generated/'; m defaults to n (no embedding).
 """
 
 import sys
 from pathlib import Path
 
+import numpy as np
+
 from canonicalize import (
     build_group,
     enumerate_motifs,
-    motif_dirname,
     summary_label,
 )
 from tools.render_supercell import annotate, render_from_tensor
@@ -108,25 +112,68 @@ def write_geometry(
     out_path.write_text("\n".join(lines) + "\n")
 
 
+def embed_tensor(t_sub: np.ndarray, n: int, m: int) -> np.ndarray:
+    """Embed an n×n defect tensor at corner (0,0) of an m×m host supercell.
+
+    t_sub: 1-D length 2n², encoding the sub-supercell C substitutions.
+    Returns 1-D length 2m² tensor with the same defects at (i, j) for
+    i, j ∈ [0, n), and pristine B/N (zeros) elsewhere.
+
+    m == n short-circuits to a copy.
+    """
+    if m < n:
+        raise ValueError(f"m ({m}) must be >= n ({n})")
+    if m == n:
+        return t_sub.copy()
+    nsq = n * n
+    msq = m * m
+    t = np.zeros(2 * msq, dtype=np.int8)
+    for i in range(n):
+        for j in range(n):
+            if t_sub[i * n + j]:
+                t[i * m + j] = 1
+            if t_sub[nsq + i * n + j]:
+                t[msq + i * m + j] = 1
+    return t
+
+
+def motif_dirname(n: int, m: int, k_B: int, k_N: int, label: str) -> str:
+    """Compose the output directory name per the naming rules."""
+    if k_B == 0 and k_N == 0:
+        return f"BN-{m}-{m}-1-pure"
+    if m == n:
+        return f"BN-{n}-{n}-1-{label}"
+    return f"BN-{m}-{m}-1-N{n}-{label}"
+
+
 def generate(
     n: int,
     k_B: int,
     k_N: int,
     out_root: Path,
     bn_in_path: Path,
+    m: int | None = None,
 ) -> list[Path]:
+    if m is None:
+        m = n
+    if m < n:
+        raise ValueError(f"m ({m}) must be >= n ({n})")
     lattice, atoms = parse_BN_in(bn_in_path)
     perms = build_group(n)
     classes = enumerate_motifs(n, k_B, k_N, perms)
     written = []
-    for canon_bytes, tensor in sorted(classes.items()):
-        label = summary_label(tensor, n, perms)
-        dirname = f"BN-{n}-{n}-1-{label}"
-        out_dir = out_root / dirname
-        out_path = out_dir / "geometry.in"
+    for canon_bytes, t_sub in sorted(classes.items()):
+        label = summary_label(t_sub, n, perms)
+        t_full = embed_tensor(t_sub, n, m)
+        dirname = motif_dirname(n, m, k_B, k_N, label)
+        out_path = out_root / dirname / "geometry.in"
+        if m == n:
+            header = f"motif: {label}  (k_B={k_B}, k_N={k_N})"
+        else:
+            header = (f"motif: {label}  (k_B={k_B}, k_N={k_N})  "
+                      f"embedded n={n} in m={m} host")
         write_geometry(
-            out_path, lattice, atoms, n, tensor,
-            header=f"motif: {label}  (k_B={k_B}, k_N={k_N})",
+            out_path, lattice, atoms, m, t_full, header=header,
         )
         written.append(out_path)
     return written
@@ -139,22 +186,27 @@ def main(argv: list[str]) -> int:
         print(f"BN.in not found at {bn_in}", file=sys.stderr)
         return 2
 
-    if len(argv) not in (3, 4):
+    if len(argv) not in (3, 4, 5):
         print(__doc__, file=sys.stderr)
         return 2
     n = int(argv[1])
     k = int(argv[2])
-    out_root = Path(argv[3]) if len(argv) == 4 else here / "generated"
+    out_root = Path(argv[3]) if len(argv) >= 4 else here / "generated"
+    m = int(argv[4]) if len(argv) == 5 else n
+    if m < n:
+        print(f"error: m ({m}) must be >= n ({n})", file=sys.stderr)
+        return 2
     splits = [(k_B, k - k_B) for k_B in range(k + 1)]
 
     total = 0
     for k_B, k_N in splits:
-        paths = generate(n, k_B, k_N, out_root, bn_in)
+        paths = generate(n, k_B, k_N, out_root, bn_in, m=m)
         print(f"# (k_B={k_B}, k_N={k_N}): {len(paths)} motif(s)")
         for p in paths:
             print(f"  {p.relative_to(here) if p.is_relative_to(here) else p}")
         total += len(paths)
-    print(f"# total: {total} geometry.in files written under {out_root}")
+    embedding = "" if m == n else f" (n={n} embedded in m={m})"
+    print(f"# total: {total} geometry.in files written under {out_root}{embedding}")
     return 0
 
 
