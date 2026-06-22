@@ -179,6 +179,27 @@ def choose_compact_representative(
     return best_t
 
 
+def _centroid_offset(t_sub: np.ndarray, n: int, m: int) -> tuple[int, int]:
+    """Pick (offset_i, offset_j) so the defect cluster's cell-index centroid
+    lands at the host centre (m-1)/2. Falls back to (m-n)//2 when there are
+    no defects (pristine host)."""
+    inds = np.nonzero(t_sub)[0]
+    if len(inds) == 0:
+        c = (m - n) // 2
+        return c, c
+    nsq = n * n
+    sites = [(int(idx) % nsq) for idx in inds]
+    ci = sum(s // n for s in sites) / len(sites)
+    cj = sum(s %  n for s in sites) / len(sites)
+    centre = (m - 1) / 2.0
+    offset_i = int(round(centre - ci))
+    offset_j = int(round(centre - cj))
+    # Clamp so the n×n window still fits inside the m×m host.
+    offset_i = max(0, min(m - n, offset_i))
+    offset_j = max(0, min(m - n, offset_j))
+    return offset_i, offset_j
+
+
 def embed_tensor(t_sub: np.ndarray, n: int, m: int, centered: bool = False) -> np.ndarray:
     """Embed an n×n defect tensor in an m×m host supercell.
 
@@ -186,8 +207,10 @@ def embed_tensor(t_sub: np.ndarray, n: int, m: int, centered: bool = False) -> n
     Returns 1-D length 2m² tensor with the same defects copied into the
     host and pristine B/N (zeros) elsewhere.
 
-    If centered=True and m > n, the n×n block is placed near the centre of
-    the m×m host; otherwise it is placed at corner (0,0).
+    If centered=True and m > n, the embedding offset is chosen so the
+    defect cluster's centroid (in cell-index space) lands at the host
+    centre, clamped so the n×n window still fits inside m×m. Otherwise
+    the block is placed at corner (0, 0).
 
     m == n short-circuits to a copy.
     """
@@ -200,8 +223,10 @@ def embed_tensor(t_sub: np.ndarray, n: int, m: int, centered: bool = False) -> n
     msq = m * m
     t = np.zeros(2 * msq, dtype=np.int8)
 
-    offset_i = (m - n) // 2 if centered else 0
-    offset_j = (m - n) // 2 if centered else 0
+    if centered:
+        offset_i, offset_j = _centroid_offset(t_sub, n, m)
+    else:
+        offset_i = offset_j = 0
 
     for i in range(n):
         for j in range(n):

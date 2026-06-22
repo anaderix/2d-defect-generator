@@ -130,18 +130,63 @@ def _cbcn3_wrap(n: int) -> np.ndarray:
     return t
 
 
-def test_embed_centered_offset():
-    """centered=True places the n×n block at offset ((m-n)//2, (m-n)//2)."""
+def test_embed_centered_places_cluster_centroid_at_host_centre():
+    """centered=True picks the offset that lands the defect cluster's
+    cell-index centroid on the m×m host centre (m-1)/2, clamped so the
+    n×n window still fits."""
     n, m = 3, 7
-    off = (m - n) // 2  # = 2
+    centre = (m - 1) / 2.0  # = 3.0
+
+    # Three atoms whose cell-index centroid is integer: C_B at (1, 1) and
+    # C_N at (0, 2), (2, 0). Centroid = (1, 1). Target offset = (2, 2).
+    # So C_B lands at (3, 3), C_N at (2, 4) and (4, 2).
     t_sub = np.zeros(2 * n * n, dtype=np.int8)
-    t_sub[1 * n + 0] = 1            # C_B at (1, 0) in n×n
-    t_sub[n * n + 0 * n + 2] = 1    # C_N at (0, 2) in n×n
+    t_sub[1 * n + 1] = 1            # C_B at (1, 1)
+    t_sub[n * n + 0 * n + 2] = 1    # C_N at (0, 2)
+    t_sub[n * n + 2 * n + 0] = 1    # C_N at (2, 0)
     t_full = embed_tensor(t_sub, n, m, centered=True)
-    assert t_full[(1 + off) * m + (0 + off)] == 1, "C_B should land at centred offset"
-    assert t_full[m * m + (0 + off) * m + (2 + off)] == 1, "C_N should land at centred offset"
-    assert int(t_full.sum()) == 2
-    print("ok  test_embed_centered_offset")
+
+    assert t_full[3 * m + 3] == 1, "C_B should land at host centre (3, 3)"
+    assert t_full[m * m + 2 * m + 4] == 1, "C_N(0,2) should land at (2, 4)"
+    assert t_full[m * m + 4 * m + 2] == 1, "C_N(2,0) should land at (4, 2)"
+    assert int(t_full.sum()) == 3
+
+    # Centroid of defect host-cells should equal host centre exactly.
+    cells = [(3, 3), (2, 4), (4, 2)]
+    ci = sum(c[0] for c in cells) / 3
+    cj = sum(c[1] for c in cells) / 3
+    assert ci == centre and cj == centre
+    print("ok  test_embed_centered_places_cluster_centroid_at_host_centre")
+
+
+def test_embed_centered_pristine_falls_back_to_block_centre():
+    """No defects → no centroid; offset falls back to (m-n)//2 so the
+    pristine block is placed in the middle of the host."""
+    n, m = 3, 7
+    t_sub = np.zeros(2 * n * n, dtype=np.int8)
+    t_full = embed_tensor(t_sub, n, m, centered=True)
+    assert (t_full == 0).all()
+    assert t_full.shape == (2 * m * m,)
+    print("ok  test_embed_centered_pristine_falls_back_to_block_centre")
+
+
+def test_embed_centered_clamps_to_fit():
+    """A single defect at a corner of the n×n window would push the
+    centroid-based offset out of [0, m-n]; the offset must clamp so the
+    n×n window stays inside the m×m host."""
+    n, m = 3, 7
+    # Single C_B at (0, 0): centroid (0, 0) → target offset (3, 3), but
+    # m-n = 4, so clamp keeps (3, 3) (still in range here). Use a different
+    # case that actually triggers clamping: defect at (2, 2). Centroid (2, 2)
+    # → target offset (1, 1), still in range. Force a clamp with m=4:
+    n2, m2 = 3, 4
+    t_sub = np.zeros(2 * n2 * n2, dtype=np.int8)
+    t_sub[0] = 1  # C_B at (0, 0); target offset = round(1.5) = 2, but m-n=1
+    t_full = embed_tensor(t_sub, n2, m2, centered=True)
+    # Offset must clamp to (1, 1) so C_B lands at host (1, 1).
+    assert t_full[1 * m2 + 1] == 1, "offset must clamp to m-n=1 so the block fits"
+    assert int(t_full.sum()) == 1
+    print("ok  test_embed_centered_clamps_to_fit")
 
 
 def test_compact_representative_preserves_canonical_class():
@@ -225,7 +270,9 @@ TESTS = [
     test_embed_identity_when_m_equals_n,
     test_embed_pristine_stays_pristine,
     test_embed_corner_anchored,
-    test_embed_centered_offset,
+    test_embed_centered_places_cluster_centroid_at_host_centre,
+    test_embed_centered_pristine_falls_back_to_block_centre,
+    test_embed_centered_clamps_to_fit,
     test_no_spurious_collapse_in_host,
     test_m_less_than_n_raises,
     test_motif_dirname_rules,
