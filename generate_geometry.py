@@ -3,9 +3,11 @@ a given n×n hBN supercell with a specified defect count, optionally embedded
 in a larger m×m host supercell.
 
 Enumerates canonical classes on the n×n sub-supercell (cheap), then embeds
-each motif at corner (0,0) of an m×m host where m >= n. The rest of the
-host is pristine hBN. The canonical hash stays computed on the n×n tensor
-so hash labels are stable across host sizes.
+each motif in an m×m host where m >= n. For m > n, a compact
+symmetry-equivalent representative is chosen before embedding so that motifs
+that are compact only through the n×n periodic boundary do not get split in
+the larger host. The canonical hash stays computed on the n×n tensor so hash
+labels are stable across host sizes.
 
 Output paths:
     {OUT}/BN-{m}-{m}-1-pure/geometry.in          when k = 0
@@ -25,6 +27,7 @@ from pathlib import Path
 import numpy as np
 
 from canonicalize import (
+    build_coords,
     build_group,
     enumerate_motifs,
     summary_label,
@@ -112,12 +115,79 @@ def write_geometry(
     out_path.write_text("\n".join(lines) + "\n")
 
 
-def embed_tensor(t_sub: np.ndarray, n: int, m: int) -> np.ndarray:
-    """Embed an n×n defect tensor at corner (0,0) of an m×m host supercell.
+def _defect_site_ij(idx: int, n: int) -> tuple[int, int]:
+    """Return the (i, j) cell index of a flat B/N defect-site index."""
+    nsq = n * n
+    site = idx if idx < nsq else idx - nsq
+    return site // n, site % n
+
+
+def _compactness_score(tensor: np.ndarray, n: int) -> tuple[float, float, int]:
+    """Score a representative by non-periodic compactness. Lower is better.
+
+    The first term catches motifs split across the artificial n×n boundary.
+    The last term mildly prefers representatives farther from the n×n edge.
+    """
+    inds = np.nonzero(tensor)[0]
+    if len(inds) <= 1:
+        return (0.0, 0.0, 0)
+
+    coords = build_coords(n)[inds]
+
+    max_pair_dist = 0.0
+    for a in range(len(coords)):
+        for b in range(a + 1, len(coords)):
+            max_pair_dist = max(max_pair_dist, float(np.linalg.norm(coords[a] - coords[b])))
+
+    span = coords.max(axis=0) - coords.min(axis=0)
+    bbox_area = float(span[0] * span[1])
+
+    min_edge_dist = min(
+        min(i, j, n - 1 - i, n - 1 - j)
+        for i, j in (_defect_site_ij(int(idx), n) for idx in inds)
+    )
+
+    return (max_pair_dist, bbox_area, -min_edge_dist)
+
+
+def choose_compact_representative(
+    t_sub: np.ndarray,
+    n: int,
+    perms: np.ndarray,
+) -> np.ndarray:
+    """Choose a symmetry-equivalent representative compact without PBC.
+
+    This keeps the canonical hash/label unchanged, but avoids embedding a
+    boundary-wrapped n×n representative into a larger m×m host.
+    """
+    best_t = t_sub.copy()
+    best_score = _compactness_score(best_t, n)
+    seen = {best_t.tobytes()}
+
+    for p in perms:
+        cand = t_sub[p].copy()
+        key = cand.tobytes()
+        if key in seen:
+            continue
+        seen.add(key)
+
+        score = _compactness_score(cand, n)
+        if score < best_score:
+            best_score = score
+            best_t = cand
+
+    return best_t
+
+
+def embed_tensor(t_sub: np.ndarray, n: int, m: int, centered: bool = False) -> np.ndarray:
+    """Embed an n×n defect tensor in an m×m host supercell.
 
     t_sub: 1-D length 2n², encoding the sub-supercell C substitutions.
-    Returns 1-D length 2m² tensor with the same defects at (i, j) for
-    i, j ∈ [0, n), and pristine B/N (zeros) elsewhere.
+    Returns 1-D length 2m² tensor with the same defects copied into the
+    host and pristine B/N (zeros) elsewhere.
+
+    If centered=True and m > n, the n×n block is placed near the centre of
+    the m×m host; otherwise it is placed at corner (0,0).
 
     m == n short-circuits to a copy.
     """
@@ -125,15 +195,22 @@ def embed_tensor(t_sub: np.ndarray, n: int, m: int) -> np.ndarray:
         raise ValueError(f"m ({m}) must be >= n ({n})")
     if m == n:
         return t_sub.copy()
+
     nsq = n * n
     msq = m * m
     t = np.zeros(2 * msq, dtype=np.int8)
+
+    offset_i = (m - n) // 2 if centered else 0
+    offset_j = (m - n) // 2 if centered else 0
+
     for i in range(n):
         for j in range(n):
+            I = i + offset_i
+            J = j + offset_j
             if t_sub[i * n + j]:
-                t[i * m + j] = 1
+                t[I * m + J] = 1
             if t_sub[nsq + i * n + j]:
-                t[msq + i * m + j] = 1
+                t[msq + I * m + J] = 1
     return t
 
 
@@ -164,14 +241,21 @@ def generate(
     written = []
     for canon_bytes, t_sub in sorted(classes.items()):
         label = summary_label(t_sub, n, perms)
-        t_full = embed_tensor(t_sub, n, m)
+        if m == n:
+            t_write = t_sub
+            t_full = embed_tensor(t_write, n, m)
+        else:
+            # Keep label/hash from the canonical n×n class, but write a
+            # compact symmetry-equivalent representative into the m×m host.
+            t_write = choose_compact_representative(t_sub, n, perms)
+            t_full = embed_tensor(t_write, n, m, centered=True)
         dirname = motif_dirname(n, m, k_B, k_N, label)
         out_path = out_root / dirname / "geometry.in"
         if m == n:
             header = f"motif: {label}  (k_B={k_B}, k_N={k_N})"
         else:
             header = (f"motif: {label}  (k_B={k_B}, k_N={k_N})  "
-                      f"embedded n={n} in m={m} host")
+                      f"compact representative embedded n={n} in m={m} host")
         write_geometry(
             out_path, lattice, atoms, m, t_full, header=header,
         )
