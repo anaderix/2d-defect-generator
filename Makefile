@@ -3,6 +3,7 @@ N ?= 5
 K ?= 2
 OUT ?= generated
 M ?= $(N)
+ALGO ?= canonical
 
 .PHONY: help test validate check-dups check-all list-motifs generate-geometry run-legacy render clean
 
@@ -32,6 +33,7 @@ help:
 	@echo "  PYTHON       — interpreter (default: python3)"
 	@echo "  N, K         — sub-supercell size and total defect count (defaults: N=5 K=2)"
 	@echo "  M            — host supercell size for embedded output (default: N)"
+	@echo "  ALGO         — enumeration algorithm: canonical | window (default: canonical)"
 	@echo "  OUT          — output directory for generate-geometry (default: generated)"
 	@echo "  MACIEJ_DIR   — path to maciej_BN/ (auto-discovered otherwise)"
 
@@ -39,6 +41,7 @@ test:
 	$(PYTHON) tests/test_canonicalize.py
 	$(PYTHON) tests/test_render.py
 	$(PYTHON) tests/test_subcell_embedding.py
+	$(PYTHON) tests/test_window_enumeration.py
 
 validate:
 	$(PYTHON) tests/validate_against_maciej.py
@@ -52,7 +55,7 @@ list-motifs:
 	$(PYTHON) list_motifs.py $(N) $(K)
 
 generate-geometry:
-	$(PYTHON) generate_geometry.py $(N) $(K) $(OUT) $(M)
+	$(PYTHON) generate_geometry.py $(N) $(K) $(OUT) $(M) --algorithm $(ALGO)
 
 run-legacy:
 	$(PYTHON) run.py

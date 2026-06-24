@@ -2,12 +2,20 @@
 a given n×n hBN supercell with a specified defect count, optionally embedded
 in a larger m×m host supercell.
 
-Enumerates canonical classes on the n×n sub-supercell (cheap), then embeds
-each motif in an m×m host where m >= n. For m > n, a compact
-symmetry-equivalent representative is chosen before embedding so that motifs
-that are compact only through the n×n periodic boundary do not get split in
-the larger host. The canonical hash stays computed on the n×n tensor so hash
-labels are stable across host sizes.
+Two enumeration algorithms (selectable with --algorithm):
+
+  canonical (default)
+    Enumerate canonical classes on the n×n sub-supercell under G(n) (cheap),
+    pick a compact orbit representative, centre it inside the m×m host. The
+    hash is computed on the n×n tensor and is stable across host sizes.
+
+  window
+    Enumerate all (k_B, k_N) placements inside the n×n corner window of the
+    m×m host, deduplicated by the subset of G(m) whose action keeps the
+    defect support inside the window (variant (B) — depends per-config, not
+    a fixed subgroup). Hash is computed on the window-canonical 2n² slice
+    and is *not* stable across m, because m×m PBC is genuinely different
+    from n×n PBC. Produces strictly more classes than canonical when m > n.
 
 Output paths:
     {OUT}/BN-{m}-{m}-1-pure/geometry.in          when k = 0
@@ -15,13 +23,15 @@ Output paths:
     {OUT}/BN-{m}-{m}-1-N{n}-{label}/geometry.in  when m > n and k > 0
 
 Usage:
-    python generate_geometry.py <n> <k> [out_dir [m]]
+    python generate_geometry.py <n> <k> [out_dir] [m] [--algorithm {canonical,window}]
 
 Generates all (k_B, k_N) splits with k_B + k_N = k.
 OUT_DIR defaults to 'generated/'; m defaults to n (no embedding).
 """
 
+import hashlib
 import sys
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -248,6 +258,82 @@ def motif_dirname(n: int, m: int, k_B: int, k_N: int, label: str) -> str:
     return f"BN-{m}-{m}-1-N{n}-{label}"
 
 
+def window_indices(n: int, m: int) -> np.ndarray:
+    """Flat indices (length 2n²) of the n×n corner-window sites in a 2m² tensor.
+
+    First n² entries map B-sublattice cells (i, j) ∈ [0,n)² to flat index
+    i*m + j in the m×m B-channel; next n² do the same for the N-channel.
+    """
+    if m < n:
+        raise ValueError(f"m ({m}) must be >= n ({n})")
+    msq = m * m
+    idx = np.zeros(2 * n * n, dtype=np.int64)
+    for i in range(n):
+        for j in range(n):
+            idx[i * n + j] = i * m + j
+            idx[n * n + i * n + j] = msq + i * m + j
+    return idx
+
+
+def enumerate_window_motifs(
+    n: int, m: int, k_B: int, k_N: int, perms_m: np.ndarray | None = None
+) -> dict:
+    """Enumerate defect configs inside the n×n corner window of an m×m host.
+
+    Dedup uses equivalence (B): configs A, B are equivalent iff ∃ g ∈ G(m)
+    with g·A = B and supp(g·A) ⊆ window. The canonical representative is
+    the lex-min over the set of images g·A whose support stays inside the
+    window, encoded as the 2n² window slice.
+
+    Returns dict: canonical_bytes (length 2n²) → window tensor (length 2n²).
+    """
+    if m < n:
+        raise ValueError(f"m ({m}) must be >= n ({n})")
+    if perms_m is None:
+        perms_m = build_group(m)
+
+    msq = m * m
+    w_idx = window_indices(n, m)
+    w_mask = np.zeros(2 * msq, dtype=bool)
+    w_mask[w_idx] = True
+    out_mask = ~w_mask
+
+    nsq = n * n
+    window_B = [int(w_idx[i]) for i in range(nsq)]
+    window_N = [int(w_idx[nsq + i]) for i in range(nsq)]
+
+    classes: dict[bytes, np.ndarray] = {}
+    for sites_B in combinations(window_B, k_B):
+        for sites_N in combinations(window_N, k_N):
+            t = np.zeros(2 * msq, dtype=np.int8)
+            for s in sites_B:
+                t[s] = 1
+            for s in sites_N:
+                t[s] = 1
+
+            best_key: bytes | None = None
+            best_win: np.ndarray | None = None
+            for p in perms_m:
+                u = t[p]
+                if u[out_mask].any():
+                    continue
+                u_win = u[w_idx]
+                key = u_win.tobytes()
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_win = u_win
+            assert best_key is not None  # identity always satisfies the window check
+            classes.setdefault(best_key, best_win)
+    return classes
+
+
+def _window_label(canon_bytes: bytes, k_B: int, k_N: int) -> str:
+    if k_B == 0 and k_N == 0:
+        return "pure"
+    h = hashlib.sha1(canon_bytes).hexdigest()[:6]
+    return f"cb{k_B}cn{k_N}_w{h}"
+
+
 def generate(
     n: int,
     k_B: int,
@@ -255,35 +341,48 @@ def generate(
     out_root: Path,
     bn_in_path: Path,
     m: int | None = None,
+    algorithm: str = "canonical",
 ) -> list[Path]:
     if m is None:
         m = n
     if m < n:
         raise ValueError(f"m ({m}) must be >= n ({n})")
+    if algorithm not in ("canonical", "window"):
+        raise ValueError(f"unknown algorithm: {algorithm!r}")
     lattice, atoms = parse_BN_in(bn_in_path)
-    perms = build_group(n)
-    classes = enumerate_motifs(n, k_B, k_N, perms)
     written = []
-    for canon_bytes, t_sub in sorted(classes.items()):
-        label = summary_label(t_sub, n, perms)
-        if m == n:
-            t_write = t_sub
-            t_full = embed_tensor(t_write, n, m)
-        else:
-            # Keep label/hash from the canonical n×n class, but write a
-            # compact symmetry-equivalent representative into the m×m host.
-            t_write = choose_compact_representative(t_sub, n, perms)
-            t_full = embed_tensor(t_write, n, m, centered=True)
+
+    if algorithm == "canonical":
+        perms = build_group(n)
+        classes = enumerate_motifs(n, k_B, k_N, perms)
+        for canon_bytes, t_sub in sorted(classes.items()):
+            label = summary_label(t_sub, n, perms)
+            if m == n:
+                t_write = t_sub
+                t_full = embed_tensor(t_write, n, m)
+                header = f"motif: {label}  (k_B={k_B}, k_N={k_N})"
+            else:
+                t_write = choose_compact_representative(t_sub, n, perms)
+                t_full = embed_tensor(t_write, n, m, centered=True)
+                header = (f"motif: {label}  (k_B={k_B}, k_N={k_N})  "
+                          f"compact representative embedded n={n} in m={m} host")
+            dirname = motif_dirname(n, m, k_B, k_N, label)
+            out_path = out_root / dirname / "geometry.in"
+            write_geometry(out_path, lattice, atoms, m, t_full, header=header)
+            written.append(out_path)
+        return written
+
+    # algorithm == "window"
+    perms_m = build_group(m)
+    classes_w = enumerate_window_motifs(n, m, k_B, k_N, perms_m)
+    for canon_bytes, t_window in sorted(classes_w.items()):
+        label = _window_label(canon_bytes, k_B, k_N)
+        t_full = embed_tensor(t_window, n, m, centered=(m > n))
         dirname = motif_dirname(n, m, k_B, k_N, label)
         out_path = out_root / dirname / "geometry.in"
-        if m == n:
-            header = f"motif: {label}  (k_B={k_B}, k_N={k_N})"
-        else:
-            header = (f"motif: {label}  (k_B={k_B}, k_N={k_N})  "
-                      f"compact representative embedded n={n} in m={m} host")
-        write_geometry(
-            out_path, lattice, atoms, m, t_full, header=header,
-        )
+        header = (f"motif: {label}  (k_B={k_B}, k_N={k_N})  "
+                  f"window-enumerated, centred in m={m} host (n={n})")
+        write_geometry(out_path, lattice, atoms, m, t_full, header=header)
         written.append(out_path)
     return written
 
@@ -295,13 +394,36 @@ def main(argv: list[str]) -> int:
         print(f"BN.in not found at {bn_in}", file=sys.stderr)
         return 2
 
-    if len(argv) not in (3, 4, 5):
+    # Split positional vs flag args. The only flag we accept is --algorithm.
+    algorithm = "canonical"
+    positional: list[str] = []
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--algorithm":
+            if i + 1 >= len(argv):
+                print("error: --algorithm requires a value", file=sys.stderr)
+                return 2
+            algorithm = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--algorithm="):
+            algorithm = a.split("=", 1)[1]
+            i += 1
+            continue
+        positional.append(a)
+        i += 1
+
+    if algorithm not in ("canonical", "window"):
+        print(f"error: unknown --algorithm {algorithm!r}", file=sys.stderr)
+        return 2
+    if len(positional) not in (2, 3, 4):
         print(__doc__, file=sys.stderr)
         return 2
-    n = int(argv[1])
-    k = int(argv[2])
-    out_root = Path(argv[3]) if len(argv) >= 4 else here / "generated"
-    m = int(argv[4]) if len(argv) == 5 else n
+    n = int(positional[0])
+    k = int(positional[1])
+    out_root = Path(positional[2]) if len(positional) >= 3 else here / "generated"
+    m = int(positional[3]) if len(positional) == 4 else n
     if m < n:
         print(f"error: m ({m}) must be >= n ({n})", file=sys.stderr)
         return 2
@@ -309,13 +431,14 @@ def main(argv: list[str]) -> int:
 
     total = 0
     for k_B, k_N in splits:
-        paths = generate(n, k_B, k_N, out_root, bn_in, m=m)
+        paths = generate(n, k_B, k_N, out_root, bn_in, m=m, algorithm=algorithm)
         print(f"# (k_B={k_B}, k_N={k_N}): {len(paths)} motif(s)")
         for p in paths:
             print(f"  {p.relative_to(here) if p.is_relative_to(here) else p}")
         total += len(paths)
     embedding = "" if m == n else f" (n={n} embedded in m={m})"
-    print(f"# total: {total} geometry.in files written under {out_root}{embedding}")
+    print(f"# total: {total} geometry.in files written under {out_root}"
+          f"{embedding} [algorithm={algorithm}]")
     return 0
 
 
